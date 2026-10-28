@@ -1,0 +1,64 @@
+# git tag v1.2.0 && git push origin v1.2.0  ->  builds the single-file exe, self-tests it, publishes the GitHub release with it.
+# Push to main / pull request  ->  same build + self-test; the exe is kept as a downloadable artifact.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart('v') } else { "0.0.0-dev" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish single exe
+        run: dotnet publish ArchiveArchiver.csproj -c Release -o publish -p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Self-test
+        shell: pwsh
+        run: |
+          $p = Start-Process publish/ArchiveArchiver.exe -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
+          if ((Get-ChildItem publish).Count -ne 1) { throw "publish is not a single file: $(Get-ChildItem publish)" }
+
+      - name: Rename
+        shell: pwsh
+        run: Rename-Item publish/ArchiveArchiver.exe "Arsivci-${{ steps.ver.outputs.version }}-win-x64.exe"
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          EXE: publish/Arsivci-${{ steps.ver.outputs.version }}-win-x64.exe
+        run: |
+          # Re-running the job for the same tag replaces the exe instead of failing on "release already exists".
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) { gh release upload $env:TAG $env:EXE --clobber }
+          else { gh release create $env:TAG $env:EXE --title "Arşivci $env:TAG" --generate-notes }
+
+      - name: Keep as artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arsivci-win-x64
+          path: publish/*.exe
